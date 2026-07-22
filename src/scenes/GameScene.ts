@@ -61,6 +61,18 @@ export class GameScene extends Phaser.Scene {
 
     this.cameras.main.setBackgroundColor("#123d2b");
     const video = this.add.video(this.scale.width / 2, this.scale.height / 2, "level-video");
+    const htmlVideoElement = video.video;
+
+    if (htmlVideoElement !== null) {
+      htmlVideoElement.muted = true;
+      htmlVideoElement.defaultMuted = true;
+      htmlVideoElement.autoplay = true;
+      htmlVideoElement.playsInline = true;
+      htmlVideoElement.setAttribute("playsinline", "");
+      htmlVideoElement.setAttribute("webkit-playsinline", "");
+      htmlVideoElement.preload = "auto";
+    }
+
     const cutterDebugLine = this.add.graphics().setDepth(0.5);
     let rescuedCount = 0;
     let escapedCount = 0;
@@ -93,10 +105,147 @@ export class GameScene extends Phaser.Scene {
     let nextFrogId = MAX_ACTIVE_FROGS;
     let frogSpawnTimer: Phaser.Time.TimerEvent | null = null;
     let videoReady = false;
-    let htmlVideoElement: HTMLVideoElement | null = null;
     let videoFrameCallbackId: number | null = null;
     let usesPresentedFrameCallback = false;
     let sceneActive = true;
+    let videoPlaybackStarted = false;
+    let videoFramePresented = false;
+    let simulationStarted = false;
+    let videoPlayAttemptInProgress = false;
+    let canPlayRetryAttempted = false;
+    let canPlayRetryPending = false;
+    let startupOverlayBackground: Phaser.GameObjects.Rectangle | null = null;
+    let startupOverlayText: Phaser.GameObjects.Text | null = null;
+    let startSimulationIfReady = (): void => {};
+
+    const resizeStartupOverlay = (): void => {
+      startupOverlayBackground?.setSize(this.scale.width, this.scale.height);
+      startupOverlayText?.setPosition(this.scale.width / 2, this.scale.height / 2);
+    };
+
+    const destroyStartupOverlay = (): void => {
+      startupOverlayBackground?.removeAllListeners();
+      startupOverlayBackground?.destroy();
+      startupOverlayText?.destroy();
+      startupOverlayBackground = null;
+      startupOverlayText = null;
+    };
+
+    const showStartupOverlay = (): void => {
+      if (startupOverlayBackground !== null) {
+        return;
+      }
+
+      startupOverlayBackground = this.add
+        .rectangle(0, 0, this.scale.width, this.scale.height, 0x000000, 0.75)
+        .setOrigin(0)
+        .setDepth(100)
+        .setInteractive();
+      startupOverlayText = this.add
+        .text(
+          this.scale.width / 2,
+          this.scale.height / 2,
+          "KLEPNI PRO SPUŠTĚNÍ",
+          {
+            color: "#ffffff",
+            fontFamily: "Arial, sans-serif",
+            fontSize: "28px",
+          },
+        )
+        .setOrigin(0.5)
+        .setDepth(101);
+
+      startupOverlayBackground.on(Phaser.Input.Events.POINTER_DOWN, () => {
+        attemptVideoPlayback("touch");
+      });
+    };
+
+    const finishSuccessfulPlayback = (source: "autoplay" | "touch"): void => {
+      videoPlaybackStarted = true;
+
+      if (source === "touch") {
+        console.log("VIDEO_TOUCH_PLAY_STARTED");
+      } else {
+        console.log("VIDEO_AUTOPLAY_STARTED");
+      }
+
+      destroyStartupOverlay();
+      startSimulationIfReady();
+    };
+
+    const finishFailedPlayback = (
+      source: "autoplay" | "touch",
+      error: unknown,
+    ): void => {
+      if (source === "touch") {
+        console.error("VIDEO_TOUCH_PLAY_FAILED", error);
+      } else {
+        console.error("VIDEO_AUTOPLAY_BLOCKED", error);
+      }
+
+      showStartupOverlay();
+    };
+
+    function attemptVideoPlayback(source: "autoplay" | "touch"): void {
+      if (
+        htmlVideoElement === null ||
+        videoPlaybackStarted ||
+        videoPlayAttemptInProgress
+      ) {
+        return;
+      }
+
+      videoPlayAttemptInProgress = true;
+
+      let playPromise: Promise<void>;
+
+      try {
+        playPromise = htmlVideoElement.play();
+      } catch (error: unknown) {
+        videoPlayAttemptInProgress = false;
+        finishFailedPlayback(source, error);
+        return;
+      }
+
+      void playPromise
+        .then(() => {
+          if (htmlVideoElement.paused) {
+            throw new Error("Video remained paused after play() resolved.");
+          }
+
+          finishSuccessfulPlayback(source);
+        })
+        .catch((error: unknown) => {
+          finishFailedPlayback(source, error);
+        })
+        .finally(() => {
+          videoPlayAttemptInProgress = false;
+
+          if (canPlayRetryPending && !videoPlaybackStarted) {
+            canPlayRetryPending = false;
+            canPlayRetryAttempted = true;
+            attemptVideoPlayback("autoplay");
+          }
+        });
+    }
+
+    const handleCanPlay = (): void => {
+      console.log("VIDEO_CANPLAY");
+
+      if (videoPlaybackStarted || canPlayRetryAttempted) {
+        return;
+      }
+
+      if (videoPlayAttemptInProgress) {
+        canPlayRetryPending = true;
+        return;
+      }
+
+      canPlayRetryAttempted = true;
+      attemptVideoPlayback("autoplay");
+    };
+
+    htmlVideoElement?.addEventListener("canplay", handleCanPlay, { once: true });
 
     for (const frog of frogs) {
       this.tweens.add({
@@ -652,6 +801,7 @@ export class GameScene extends Phaser.Scene {
       const centerX = gameSize.width / 2;
       const centerY = gameSize.height / 2;
 
+      resizeStartupOverlay();
       video.setPosition(centerX, centerY);
 
       if (video.width > 0 && video.height > 0) {
@@ -697,12 +847,34 @@ export class GameScene extends Phaser.Scene {
       }
     };
 
+    startSimulationIfReady = (): void => {
+      if (
+        !sceneActive ||
+        simulationStarted ||
+        !videoPlaybackStarted ||
+        !videoFramePresented
+      ) {
+        return;
+      }
+
+      simulationStarted = true;
+      resizeContent(this.scale.gameSize);
+
+      for (let count = 0; count < INITIAL_FROG_COUNT; count += 1) {
+        spawnFrogIfPossible();
+      }
+
+      frogSpawnTimer = this.time.addEvent({
+        delay: FROG_SPAWN_INTERVAL_MS,
+        loop: true,
+        callback: spawnFrogIfPossible,
+      });
+    };
+
     video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => {
       const htmlVideo = video.video;
 
       if (htmlVideo !== null) {
-        htmlVideoElement = htmlVideo;
-
         if (typeof htmlVideo.requestVideoFrameCallback === "function") {
           usesPresentedFrameCallback = true;
 
@@ -727,17 +899,8 @@ export class GameScene extends Phaser.Scene {
         }
       }
 
-      resizeContent(this.scale.gameSize);
-
-      for (let count = 0; count < INITIAL_FROG_COUNT; count += 1) {
-        spawnFrogIfPossible();
-      }
-
-      frogSpawnTimer = this.time.addEvent({
-        delay: FROG_SPAWN_INTERVAL_MS,
-        loop: true,
-        callback: spawnFrogIfPossible,
-      });
+      videoFramePresented = true;
+      startSimulationIfReady();
     });
     this.scale.on(Phaser.Scale.Events.RESIZE, resizeContent);
     this.events.on(Phaser.Scenes.Events.UPDATE, updateFrogs);
@@ -745,6 +908,8 @@ export class GameScene extends Phaser.Scene {
       sceneActive = false;
       frogSpawnTimer?.remove(false);
       frogSpawnTimer = null;
+      htmlVideoElement?.removeEventListener("canplay", handleCanPlay);
+      destroyStartupOverlay();
       cutterDebugLine.destroy();
       debugHud.destroy();
 
@@ -769,6 +934,7 @@ export class GameScene extends Phaser.Scene {
       this.events.off(Phaser.Scenes.Events.UPDATE, updateFrogs);
     });
     video.setMute(true).play(false);
+    attemptVideoPlayback("autoplay");
   }
 
   private handleShutdown(): void {
