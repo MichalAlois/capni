@@ -6,7 +6,11 @@ export class PreloadScene extends Phaser.Scene {
   }
 
   public preload(): void {
-    this.load.video("level-video", "/assets/video/kombajn_v1.mp4", true);
+    this.load.video(
+      "level-video",
+      `${import.meta.env.BASE_URL}assets/video/kombajn_v1.mp4`,
+      true,
+    );
   }
 
   public create(): void {
